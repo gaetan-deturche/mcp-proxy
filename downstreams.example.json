@@ -1,0 +1,19 @@
+{
+  "callTimeoutSeconds": 120,
+  "downstreams": [
+    { "name": "jetbrains",        "transport": "http", "url": "http://127.0.0.1:64342/stream" },
+    { "name": "intellij",         "transport": "http", "url": "http://127.0.0.1:64343/stream" },
+    { "name": "rider-mcp-plugin", "transport": "http", "url": "http://127.0.0.1:6363/stream" },
+    {
+      "name": "mattermost",
+      "transport": "stdio",
+      "command": "C:\\path\\to\\mattermost-mcp-server.exe",
+      "args": [],
+      "env": {
+        "MM_SERVER_URL": "https://mattermost.example.com",
+        "MM_ACCESS_TOKEN": "REPLACE_WITH_YOUR_TOKEN"
+      }
+    },
+    { "name": "sentry", "transport": "http", "url": "https://mcp.sentry.dev/mcp", "oauth": true }
+  ]
+}

@@ -1,0 +1,14 @@
+# Build artifacts
+*.exe
+*~
+*.exe~
+
+# Local runtime config — contains secrets (mattermost token, etc.).
+# Copy downstreams.example.json -> downstreams.json and fill in your values.
+downstreams.json
+
+# OAuth token store — contains access/refresh tokens.
+oauth-tokens.json
+
+# Runtime log
+mcp-proxy.log
