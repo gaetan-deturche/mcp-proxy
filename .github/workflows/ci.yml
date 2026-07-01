@@ -14,3 +14,28 @@ jobs:
           go-version: '1.26'
       - run: go build ./...
       - run: go vet ./...
+
+  release:
+    # Only on version tags (e.g. v0.2.0): build the Windows binary and publish a release.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - name: Build Windows binary (stamped with the tag)
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: '0'
+        run: go build -ldflags "-X main.buildVersion=${{ github.ref_name }}" -o mcp-proxy.exe .
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: mcp-proxy ${{ github.ref_name }}
+          files: mcp-proxy.exe
+          generate_release_notes: true
