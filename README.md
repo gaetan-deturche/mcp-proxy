@@ -1,6 +1,6 @@
 # mcp-aggregator-proxy
 
-A tiny, dependency-free **stdio MCP aggregator** written in Go. An MCP client (e.g. Claude Code) spawns it once over stdio; it connects out to several downstream MCP servers — over **Streamable HTTP** or **stdio** — merges their tools under a `<server>__` prefix, and forwards `tools/call` to the right one.
+A tiny, dependency-free **MCP aggregator** written in Go. An MCP client (e.g. Claude Code) reaches it over **stdio** (client spawns it) or **Streamable HTTP** (client connects to a persistent listener — recommended, see below); it connects out to several downstream MCP servers — over **Streamable HTTP** or **stdio** — merges their tools under a `<server>__` prefix, and forwards `tools/call` to the right one.
 
 ## Why
 
@@ -57,7 +57,9 @@ Full client (`oauth.go`): RFC 9728 protected-resource + RFC 8414 authorization-s
 
 ## Wire into Claude Code
 
-In `~/.claude.json`, a single stdio entry replaces the individual server entries:
+Two transport modes.
+
+### stdio (default) — client spawns the proxy
 
 ```json
 {
@@ -70,7 +72,35 @@ In `~/.claude.json`, a single stdio entry replaces the individual server entries
 }
 ```
 
-Tools then appear as `mcp__mcp-proxy__<server>__<tool>`.
+Simple, but the proxy's lifetime is tied to the client-owned stdin pipe: when the client recycles its MCP connection it closes that pipe, the proxy hits EOF and exits, and if the client fails to re-spawn (observed mid-session) every tool disappears until a full restart.
+
+### HTTP (recommended) — client connects to a persistent proxy
+
+Run the proxy once as a background listener and have the client *connect* instead of spawn, so a connection recycle is just a reconnect — downstream connections and OAuth tokens stay warm, and it survives client/session restarts.
+
+```sh
+mcp-proxy.exe -http 127.0.0.1:6390     # serves Streamable HTTP at /mcp
+```
+
+```json
+{
+  "mcpServers": {
+    "mcp-proxy": {
+      "type": "http",
+      "url": "http://127.0.0.1:6390/mcp"
+    }
+  }
+}
+```
+
+`POST /mcp` handles JSON-RPC requests; `GET /mcp` is the SSE stream that carries `notifications/tools/list_changed` (so `reload` self-healing still works); `GET /health` returns `ok`.
+
+**Autostart at logon (Windows, no admin):** `start-proxy-hidden.vbs` launches `mcp-proxy.exe` sitting next to it, with no console window (it self-locates via its own script dir, so keep the two together). Two ways to run it at logon — use **one**, not both (a second instance can't bind the port and exits):
+
+- **Task Scheduler:** run `register-startup-task.bat` from an interactive shell — it registers a per-user ONLOGON task pointing at the VBS (paths resolved from `%~dp0`, nothing hardcoded) and starts the proxy immediately. Note: creating the task may be blocked by EDR/policy in non-interactive contexts.
+- **Startup folder:** drop a *shortcut* to `start-proxy-hidden.vbs` in `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\`. Use a shortcut, not a copy — the VBS resolves `mcp-proxy.exe` relative to its own location, so a copy in the Startup folder would look for the exe there.
+
+Tools then appear as `mcp__mcp-proxy__<server>__<tool>` in either mode.
 
 ## Notes
 

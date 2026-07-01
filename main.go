@@ -38,7 +38,7 @@ import (
 
 const (
 	proxyName       = "mcp-aggregator-proxy"
-	proxyVersion    = "0.1.0"
+	proxyVersion    = "0.2.0"
 	protocolVersion = "2025-03-26"
 )
 
@@ -793,6 +793,14 @@ var (
 
 func writeMessage(m rpcMessage) {
 	m.JSONRPC = "2.0"
+	emit(m)
+}
+
+// emit delivers a fully-formed message to the active client transport. Default
+// is stdio (stdout); HTTP mode swaps in the router's sink at startup (httpserve.go).
+var emit = emitStdout
+
+func emitStdout(m rpcMessage) {
 	b, _ := json.Marshal(m)
 	stdoutMu.Lock()
 	out.Write(b)
@@ -1043,6 +1051,7 @@ func main() {
 	exeDir := filepath.Dir(exe)
 	configPath := flag.String("config", filepath.Join(exeDir, "downstreams.json"), "path to downstreams.json")
 	logPath := flag.String("log", filepath.Join(exeDir, "mcp-proxy.log"), "path to log file (stderr always)")
+	httpAddr := flag.String("http", "", "if set (e.g. 127.0.0.1:6390), serve MCP over Streamable HTTP instead of stdio — lets the client connect (survives session recycles) rather than spawn")
 	oauthTest := flag.String("oauth-test", "", "internal: test OAuth discovery+registration for a resource URL, then exit")
 	flag.Parse()
 
@@ -1100,6 +1109,15 @@ func main() {
 		log.Fatalf("cannot apply config: %v", err)
 	}
 
+	// In HTTP mode, redirect the message sink to the router BEFORE any startup
+	// notification can fire, so emit is set consistently (no data race on the
+	// global) and list_changed reaches SSE subscribers rather than stdout.
+	var router *httpRouter
+	if *httpAddr != "" {
+		router = newHTTPRouter()
+		emit = router.emit
+	}
+
 	// Probe downstreams at startup so the first tools/list is populated; runs in
 	// the background so initialize stays instant. Completion emits list_changed.
 	go func() {
@@ -1110,7 +1128,15 @@ func main() {
 	}()
 
 	srv := &server{reg: reg}
-	log.Printf("%s %s starting; fronting %d downstream(s): %s", proxyName, proxyVersion, len(reg.order), strings.Join(reg.order, ", "))
+	if *httpAddr != "" {
+		log.Printf("%s %s starting (HTTP mode on %s); fronting %d downstream(s): %s", proxyName, proxyVersion, *httpAddr, len(reg.order), strings.Join(reg.order, ", "))
+		if err := serveHTTP(srv, router, *httpAddr); err != nil {
+			log.Fatalf("http server error: %v", err)
+		}
+		return
+	}
+
+	log.Printf("%s %s starting (stdio mode); fronting %d downstream(s): %s", proxyName, proxyVersion, len(reg.order), strings.Join(reg.order, ", "))
 	srv.serve()
 
 	for _, name := range reg.order {
