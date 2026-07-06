@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -155,7 +156,22 @@ type httpDownstream struct {
 }
 
 func newHTTPDownstream(cfg dsConfig) *httpDownstream {
-	return &httpDownstream{cfg: cfg, client: &http.Client{}}
+	// A connected-but-unresponsive downstream (e.g. an IDE mid-shutdown that
+	// keeps its TCP port open but stops answering) must not stall a client
+	// request up to callTimeout: the MCP client times out its POST first and
+	// tears down the whole transport, so every tool vanishes. Bound the dial
+	// and the wait for response *headers* so such a downstream fails fast with
+	// a clean error. Safe for legitimately long tool calls — our downstreams
+	// speak Streamable HTTP/SSE, so headers arrive immediately and only the
+	// result event is slow; that stays bounded by the per-call ctx, not by
+	// ResponseHeaderTimeout.
+	tr := &http.Transport{
+		DialContext:           (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
+		ResponseHeaderTimeout: 20 * time.Second,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+	}
+	return &httpDownstream{cfg: cfg, client: &http.Client{Transport: tr}}
 }
 
 func (h *httpDownstream) Name() string { return h.cfg.Name }
