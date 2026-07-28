@@ -39,7 +39,7 @@ import (
 
 const (
 	proxyName       = "mcp-aggregator-proxy"
-	proxyVersion    = "0.2.1"
+	proxyVersion    = "0.2.2"
 	protocolVersion = "2025-03-26"
 )
 
@@ -153,6 +153,8 @@ type httpDownstream struct {
 	sessionID string
 	conn      bool
 	idc       int64
+	streamCancel context.CancelFunc // cancels the keepalive GET /stream, if any
+	onNotify     func(rpcMessage)   // server->client notifications from the keepalive stream
 }
 
 func newHTTPDownstream(cfg dsConfig) *httpDownstream {
@@ -182,7 +184,7 @@ func (h *httpDownstream) Connected() bool {
 	return h.conn
 }
 
-func (h *httpDownstream) Close() {}
+func (h *httpDownstream) Close() { h.stopStream() }
 
 func (h *httpDownstream) nextID() json.RawMessage {
 	n := atomic.AddInt64(&h.idc, 1)
@@ -190,11 +192,12 @@ func (h *httpDownstream) nextID() json.RawMessage {
 }
 
 func (h *httpDownstream) Connect(ctx context.Context) error {
+	h.stopStream()
 	h.mu.Lock()
 	h.sessionID = ""
 	h.conn = false
 	h.mu.Unlock()
-	_, rerr, err := h.Request(ctx, "initialize", initParams())
+	_, rerr, err := h.requestOnce(ctx, "initialize", initParams())
 	if err != nil {
 		return err
 	}
@@ -203,12 +206,30 @@ func (h *httpDownstream) Connect(ctx context.Context) error {
 	}
 	h.mu.Lock()
 	h.conn = true
+	sid := h.sessionID
 	h.mu.Unlock()
 	_ = h.Notify(ctx, "notifications/initialized", nil)
+	// Hold a GET /stream open: this JetBrains-style server expires the session
+	// after ~10-30s of idle unless a client keeps the SSE channel open, and the
+	// stream also carries server->client notifications (e.g. tools/list_changed).
+	h.startStream(sid)
 	return nil
 }
 
+// Request wraps requestOnce with a stale-session guard: if the downstream reports
+// its session is gone/uninitialized (e.g. the keepalive stream broke on an IDE
+// restart), re-initialize once and retry. initialize is never retried (recursion).
 func (h *httpDownstream) Request(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, *rpcError, error) {
+	res, rerr, err := h.requestOnce(ctx, method, params)
+	if method != "initialize" && staleSession(rerr, err) {
+		if cerr := h.Connect(ctx); cerr == nil {
+			return h.requestOnce(ctx, method, params)
+		}
+	}
+	return res, rerr, err
+}
+
+func (h *httpDownstream) requestOnce(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, *rpcError, error) {
 	msg := rpcMessage{JSONRPC: "2.0", ID: h.nextID(), Method: method, Params: params}
 	resp, err := h.post(ctx, msg, false)
 	if err != nil {
@@ -223,10 +244,100 @@ func (h *httpDownstream) Request(ctx context.Context, method string, params json
 	return resp.Result, nil, nil
 }
 
+// staleSession recognises the "session expired / not initialized" signals from a
+// Streamable-HTTP downstream (HTTP 404 "session not found", or a JSON-RPC error
+// like -32000 "Server not initialized" / "Session not found").
+func staleSession(rerr *rpcError, err error) bool {
+	s := ""
+	if err != nil {
+		s = err.Error()
+	}
+	if rerr != nil {
+		s += " " + rerr.Message
+	}
+	s = strings.ToLower(s)
+	return strings.Contains(s, "session not found") || strings.Contains(s, "not initialized")
+}
+
 func (h *httpDownstream) Notify(ctx context.Context, method string, params json.RawMessage) error {
 	msg := rpcMessage{JSONRPC: "2.0", Method: method, Params: params}
 	_, err := h.post(ctx, msg, true)
 	return err
+}
+
+// startStream opens a background GET /stream (SSE) and holds it open to keep the
+// server session alive and to receive server->client notifications. A stream
+// error/EOF just ends the goroutine; reconnection is driven lazily by Request's
+// stale-session retry on the next call.
+func (h *httpDownstream) startStream(sid string) {
+	streamCtx, cancel := context.WithCancel(context.Background())
+	h.mu.Lock()
+	h.streamCancel = cancel
+	h.mu.Unlock()
+	go h.readStream(streamCtx, sid)
+}
+
+func (h *httpDownstream) stopStream() {
+	h.mu.Lock()
+	c := h.streamCancel
+	h.streamCancel = nil
+	h.mu.Unlock()
+	if c != nil {
+		c()
+	}
+}
+
+func (h *httpDownstream) readStream(ctx context.Context, sid string) {
+	req, err := http.NewRequestWithContext(ctx, "GET", h.cfg.URL, nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("MCP-Protocol-Version", protocolVersion)
+	for k, v := range h.cfg.Headers {
+		req.Header.Set(k, v)
+	}
+	if h.cfg.OAuth && oauthStore != nil {
+		if tok, e := oauthStore.accessToken(h.cfg.Name); e == nil {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
+	}
+	if sid != "" {
+		req.Header.Set("Mcp-Session-Id", sid)
+	}
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return
+	}
+	br := bufio.NewReaderSize(resp.Body, 1<<20)
+	var data strings.Builder
+	for {
+		line, rerr := br.ReadString('\n')
+		if len(line) > 0 {
+			line = strings.TrimRight(line, "\r\n")
+			switch {
+			case strings.HasPrefix(line, "data:"):
+				data.WriteString(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			case line == "":
+				if data.Len() > 0 {
+					var m rpcMessage
+					if json.Unmarshal([]byte(data.String()), &m) == nil && len(m.ID) == 0 && m.Method != "" {
+						if cb := h.onNotify; cb != nil {
+							cb(m)
+						}
+					}
+					data.Reset()
+				}
+			}
+		}
+		if rerr != nil {
+			return // stream ended; next Request re-Connects via the stale-session retry
+		}
+	}
 }
 
 func (h *httpDownstream) post(ctx context.Context, msg rpcMessage, isNotify bool) (*rpcMessage, error) {
@@ -560,7 +671,27 @@ func (r *registry) applyConfig() error {
 	// Create newly added (or changed-and-removed-above) downstreams.
 	for _, name := range order {
 		if _, ok := r.dss[name]; !ok {
-			r.dss[name] = newDownstream(want[name])
+			ds := newDownstream(want[name])
+			// A downstream's keepalive stream pushes tools/list_changed when its tools
+			// change; re-probe and propagate list_changed upstream so Claude sees it live.
+			if hd, ok := ds.(*httpDownstream); ok {
+				hd.onNotify = func(m rpcMessage) {
+					// tools/list_changed is special: the proxy must re-probe and re-apply the
+					// "<server>__" prefix before the client refetches. Every OTHER server->
+					// client notification is forwarded raw. Only notifications reach here
+					// (readStream drops server->client requests and responses). Forwarding
+					// fans out to ALL connected sessions (no per-session routing); progress
+					// correlates via the client-set progressToken, passed through untouched.
+					if m.Method == "notifications/tools/list_changed" {
+						if changed, _ := r.reload(context.Background()); changed {
+							sendListChanged()
+						}
+						return
+					}
+					writeMessage(m)
+				}
+			}
+			r.dss[name] = ds
 			r.sigs[name] = dsSig(want[name])
 		}
 	}
