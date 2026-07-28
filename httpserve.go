@@ -19,7 +19,9 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -118,6 +120,10 @@ func serveHTTP(srv *server, router *httpRouter, addr string) error {
 	return hs.ListenAndServe()
 }
 
+// httpReqSeq stamps each inbound HTTP request with a process-unique routing key;
+// see the comment inside handleHTTPPost for why the client's id can't be trusted.
+var httpReqSeq int64
+
 func handleHTTPPost(srv *server, router *httpRouter, w http.ResponseWriter, r *http.Request) {
 	var msg rpcMessage
 	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<20)).Decode(&msg); err != nil {
@@ -132,23 +138,33 @@ func handleHTTPPost(srv *server, router *httpRouter, w http.ResponseWriter, r *h
 		return
 	}
 
-	key := string(msg.ID)
+	// Route on a proxy-assigned unique key, not the client id: one proxy fronts
+	// every Claude session (each an MCP client numbering ids from 1), so client ids
+	// collide across sessions (and a restarted client's stale in-flight request can
+	// match a new client's reused id) -> "no waiter for response id N (dropped)".
+	// The key must equal string(msg.ID) so register and emit agree on it.
+	origID := msg.ID
+	raw := json.RawMessage(strconv.Quote("h" + strconv.FormatInt(atomic.AddInt64(&httpReqSeq, 1), 10)))
+	key := string(raw)
+	msg.ID = raw
 	ch := router.register(key)
 	defer router.unregister(key)
 
-	go srv.handle(msg) // emits its response via router.emit -> ch
+	go srv.handle(msg) // echoes msg.ID (our unique key) -> router.emit -> ch
 
 	select {
 	case resp := <-ch:
 		resp.JSONRPC = "2.0"
+		resp.ID = origID // restore the client's original id
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
 	case <-r.Context().Done():
-		// client hung up; router.unregister (deferred) cleans the waiter
+		// Client hung up; deferred unregister cleans the waiter. A late response for
+		// this now-unique key finds no waiter and is dropped — never misrouted.
 	case <-time.After(150 * time.Second):
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(rpcMessage{
-			JSONRPC: "2.0", ID: msg.ID,
+			JSONRPC: "2.0", ID: origID,
 			Error: &rpcError{Code: -32000, Message: "proxy timeout waiting for handler"},
 		})
 	}
