@@ -124,11 +124,23 @@ func serveHTTP(srv *server, router *httpRouter, addr string) error {
 // see the comment inside handleHTTPPost for why the client's id can't be trusted.
 var httpReqSeq int64
 
+// connSeq tags each held SSE stream so its open/close can be correlated in the log.
+// Each Claude session is its own CLI client = its own connection here, so tracking
+// per-connection lifecycle is how we tell WHICH session's transport dropped.
+var connSeq int64
+
 func handleHTTPPost(srv *server, router *httpRouter, w http.ResponseWriter, r *http.Request) {
 	var msg rpcMessage
 	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<20)).Decode(&msg); err != nil {
 		http.Error(w, "invalid json-rpc: "+err.Error(), http.StatusBadRequest)
 		return
+	}
+
+	// A client's transport lifecycle is otherwise invisible here; log the events that
+	// mark a (re)connect or a teardown so a session's "proxy not connected" can be
+	// correlated to what its own connection actually did.
+	if msg.Method == "initialize" {
+		log.Printf("http: handshake (initialize) remote=%s", r.RemoteAddr)
 	}
 
 	// Client notification or response (no id): dispatch, nothing to return.
@@ -159,9 +171,11 @@ func handleHTTPPost(srv *server, router *httpRouter, w http.ResponseWriter, r *h
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
 	case <-r.Context().Done():
-		// Client hung up; deferred unregister cleans the waiter. A late response for
-		// this now-unique key finds no waiter and is dropped — never misrouted.
+		// Client hung up mid-request: a teardown signal worth recording. The deferred
+		// unregister cleans the waiter; a late response finds none and is dropped.
+		log.Printf("http: client hung up remote=%s method=%s", r.RemoteAddr, msg.Method)
 	case <-time.After(150 * time.Second):
+		log.Printf("http: POST timeout remote=%s method=%s", r.RemoteAddr, msg.Method)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(rpcMessage{
 			JSONRPC: "2.0", ID: origID,
@@ -184,6 +198,14 @@ func handleHTTPGet(router *httpRouter, w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
+
+	cid := atomic.AddInt64(&connSeq, 1)
+	opened := time.Now()
+	reason := "client-closed"
+	log.Printf("http: SSE open cid=%d remote=%s", cid, r.RemoteAddr)
+	defer func() {
+		log.Printf("http: SSE close cid=%d remote=%s dur=%s reason=%s", cid, r.RemoteAddr, time.Since(opened).Round(time.Second), reason)
+	}()
 
 	ch := router.subscribe()
 	defer router.unsubscribe(ch)

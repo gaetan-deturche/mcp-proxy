@@ -39,7 +39,7 @@ import (
 
 const (
 	proxyName       = "mcp-aggregator-proxy"
-	proxyVersion    = "0.2.2"
+	proxyVersion    = "0.2.3"
 	protocolVersion = "2025-03-26"
 )
 
