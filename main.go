@@ -34,12 +34,13 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
 const (
 	proxyName       = "mcp-aggregator-proxy"
-	proxyVersion    = "0.2.3"
+	proxyVersion    = "0.2.4"
 	protocolVersion = "2025-03-26"
 )
 
@@ -472,6 +473,9 @@ func (s *stdioDownstream) Close() {
 
 func (s *stdioDownstream) start() error {
 	cmd := exec.Command(s.cfg.Command, s.cfg.Args...)
+	// CREATE_NO_WINDOW: under the windowless proxy a console child (mattermost/winstream)
+	// would otherwise pop its own console window; stdio is piped so no console is needed.
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: 0x08000000}
 	env := os.Environ()
 	for k, v := range s.cfg.Env {
 		env = append(env, k+"="+v)
@@ -1226,7 +1230,10 @@ func main() {
 	// Logs go to stderr (+ a file). NEVER stdout — that's the protocol channel.
 	var logw io.Writer = os.Stderr
 	if f, err := os.OpenFile(*logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
-		logw = io.MultiWriter(os.Stderr, f)
+		// Log to the FILE directly. In windowless (-H windowsgui) mode os.Stderr is an
+		// invalid handle; io.MultiWriter(os.Stderr, f) aborts on the stderr write error
+		// BEFORE it ever writes f, so the whole log went silent. File is the source of truth.
+		logw = f
 	}
 	log.SetOutput(logw)
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
