@@ -34,7 +34,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
@@ -473,9 +472,9 @@ func (s *stdioDownstream) Close() {
 
 func (s *stdioDownstream) start() error {
 	cmd := exec.Command(s.cfg.Command, s.cfg.Args...)
-	// CREATE_NO_WINDOW: under the windowless proxy a console child (mattermost/winstream)
-	// would otherwise pop its own console window; stdio is piped so no console is needed.
-	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: 0x08000000}
+	// Windows: stop a console child popping its own window under the windowless proxy
+	// (no-op on other OSes; see procattr_*.go). stdio is piped, so no console is needed.
+	hideConsole(cmd)
 	env := os.Environ()
 	for k, v := range s.cfg.Env {
 		env = append(env, k+"="+v)
