@@ -39,7 +39,7 @@ import (
 
 const (
 	proxyName       = "mcp-aggregator-proxy"
-	proxyVersion    = "0.2.4"
+	proxyVersion    = "0.2.5"
 	protocolVersion = "2025-03-26"
 )
 
@@ -775,7 +775,7 @@ func statusToolDef() json.RawMessage {
 }
 
 func addServerToolDef() json.RawMessage {
-	return json.RawMessage(`{"name":"add_server","description":"Dynamically add (or replace) a downstream MCP server and connect to it immediately — no proxy restart. Persists to downstreams.json. For HTTP/Streamable servers pass url (and optional headers, e.g. for auth); for stdio servers pass command (and optional args/env).","inputSchema":{"type":"object","properties":{"name":{"type":"string","description":"Unique downstream name; used as the '<name>__' tool prefix."},"transport":{"type":"string","enum":["http","stdio"],"description":"http = Streamable HTTP; stdio = spawn a local process."},"url":{"type":"string","description":"Endpoint URL (http transport)."},"command":{"type":"string","description":"Executable path (stdio transport)."},"args":{"type":"array","items":{"type":"string"},"description":"Process args (stdio)."},"env":{"type":"object","additionalProperties":{"type":"string"},"description":"Extra environment variables (stdio)."},"headers":{"type":"object","additionalProperties":{"type":"string"},"description":"Extra HTTP headers (http), e.g. {\"Authorization\":\"Bearer <token>\"}."}},"required":["name","transport"]}}`)
+	return json.RawMessage(`{"name":"add_server","description":"Dynamically add (or replace) a downstream MCP server and connect to it immediately — no proxy restart. Persists to downstreams.json. For HTTP/Streamable servers pass url (and optional headers, e.g. for auth); for stdio servers pass command (and optional args/env).","inputSchema":{"type":"object","properties":{"name":{"type":"string","description":"Unique downstream name; used as the '<name>__' tool prefix."},"transport":{"type":"string","enum":["http","stdio"],"description":"http = Streamable HTTP; stdio = spawn a local process."},"url":{"type":"string","description":"Endpoint URL (http transport)."},"command":{"type":"string","description":"Executable path (stdio transport)."},"args":{"type":"array","items":{"type":"string"},"description":"Process args (stdio)."},"env":{"type":"object","additionalProperties":{"type":"string"},"description":"Extra environment variables (stdio)."},"headers":{"type":"object","additionalProperties":{"type":"string"},"description":"Extra HTTP headers (http), e.g. {\"Authorization\":\"Bearer <token>\"}."},"oauth":{"type":"boolean","description":"http only: run the OAuth browser sign-in for this server (then call authenticate), e.g. sentry."}},"required":["name","transport"]}}`)
 }
 
 func removeServerToolDef() json.RawMessage {

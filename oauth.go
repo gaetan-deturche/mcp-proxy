@@ -136,13 +136,18 @@ func discoverOAuth(ctx context.Context, resourceURL string) (*oauthMeta, error) 
 		AuthorizationServers []string `json:"authorization_servers"`
 		ScopesSupported      []string `json:"scopes_supported"`
 	}
-	if err := httpGetJSON(ctx, prmURL, &prm); err != nil {
-		return nil, fmt.Errorf("protected-resource metadata: %w", err)
+	var as string
+	if err := httpGetJSON(ctx, prmURL, &prm); err == nil && len(prm.AuthorizationServers) > 0 {
+		as = strings.TrimRight(prm.AuthorizationServers[0], "/")
+	} else {
+		// RFC 8414 without RFC 9728: servers like Atlassian (2025-03-26 spec) expose no
+		// protected-resource metadata but serve oauth-authorization-server at the origin.
+		u, perr := url.Parse(resourceURL)
+		if perr != nil {
+			return nil, perr
+		}
+		as = u.Scheme + "://" + u.Host
 	}
-	if len(prm.AuthorizationServers) == 0 {
-		return nil, errors.New("no authorization_servers in resource metadata")
-	}
-	as := strings.TrimRight(prm.AuthorizationServers[0], "/")
 	var asm struct {
 		AuthorizationEndpoint string   `json:"authorization_endpoint"`
 		TokenEndpoint         string   `json:"token_endpoint"`
