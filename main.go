@@ -39,7 +39,7 @@ import (
 
 const (
 	proxyName       = "mcp-aggregator-proxy"
-	proxyVersion    = "0.2.5"
+	proxyVersion    = "0.2.6"
 	protocolVersion = "2025-03-26"
 )
 
@@ -97,6 +97,7 @@ type dsConfig struct {
 	Env       map[string]string `json:"env,omitempty"`
 	Headers   map[string]string `json:"headers,omitempty"` // extra HTTP headers (e.g. {"Authorization":"Bearer <token>"})
 	OAuth     bool              `json:"oauth,omitempty"`   // http only: obtain/attach a bearer token via the OAuth flow
+	LoginFlow string            `json:"loginFlow,omitempty"` // non-oauth interactive sign-in (e.g. "mattermost": session-token login)
 	Disabled  bool              `json:"disabled,omitempty"`
 }
 
@@ -1122,19 +1123,53 @@ func (s *server) handleCall(msg rpcMessage) {
 			return
 		}
 		s.reg.mu.RLock()
-		var url string
+		var cfg dsConfig
+		var found bool
 		for _, d := range s.reg.desired {
 			if d.Name == a.Name {
-				url = d.URL
+				cfg = d
+				found = true
 			}
 		}
 		s.reg.mu.RUnlock()
-		if url == "" {
+		if !found {
+			respondRaw(msg.ID, toolText("no downstream named "+a.Name+".", true))
+			return
+		}
+		// Session-login downstreams (e.g. mattermost): open a local sign-in page,
+		// obtain a session token, store it in the downstream's env, respawn it.
+		if cfg.LoginFlow == "mattermost" {
+			authCtx, cancel := context.WithTimeout(context.Background(), 200*time.Second)
+			token, err := authenticateMattermost(authCtx, cfg)
+			cancel()
+			if err != nil {
+				respondRaw(msg.ID, toolText("Authentication failed for "+a.Name+": "+err.Error(), true))
+				return
+			}
+			newCfg := cfg
+			newCfg.Env = map[string]string{}
+			for k, v := range cfg.Env {
+				newCfg.Env[k] = v
+			}
+			newCfg.Env["MM_ACCESS_TOKEN"] = token
+			s.reg.upsertConfig(newCfg)
+			if err := s.reg.writeConfig(); err != nil {
+				respondRaw(msg.ID, toolText("got a token but failed to persist config: "+err.Error(), true))
+				return
+			}
+			changed, status := s.reg.reload(context.Background())
+			if changed {
+				sendListChanged()
+			}
+			respondRaw(msg.ID, toolText("Authenticated "+a.Name+" (new session token stored).\n"+status, false))
+			return
+		}
+		if cfg.URL == "" {
 			respondRaw(msg.ID, toolText("no HTTP downstream named "+a.Name+" (authenticate is for http/oauth servers).", true))
 			return
 		}
 		authCtx, cancel := context.WithTimeout(context.Background(), 200*time.Second)
-		rec, err := authenticateOAuth(authCtx, a.Name, url)
+		rec, err := authenticateOAuth(authCtx, a.Name, cfg.URL)
 		cancel()
 		if err != nil {
 			respondRaw(msg.ID, toolText("Authentication failed for "+a.Name+": "+err.Error(), true))

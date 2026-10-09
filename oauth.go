@@ -415,5 +415,5 @@ func tokenPost(ctx context.Context, authEP, tokenEP, regEP, resource, clientID s
 }
 
 func authenticateToolDef() json.RawMessage {
-	return json.RawMessage(`{"name":"authenticate","description":"Run the OAuth sign-in flow for a downstream MCP server that requires it (e.g. sentry, marked \"oauth\": true). Opens your browser to authorize; on success the token is stored and auto-refreshed, and the server's tools are attached without a restart.","inputSchema":{"type":"object","properties":{"name":{"type":"string","description":"Downstream name to authenticate (e.g. sentry)."}},"required":["name"]}}`)
+	return json.RawMessage(`{"name":"authenticate","description":"Interactive sign-in for a downstream that needs it. OAuth servers (e.g. sentry, marked \"oauth\": true) open your browser to authorize; the token is stored and auto-refreshed. Session-login servers (e.g. mattermost, marked \"loginFlow\") open a local sign-in page for your email+password and store the resulting session token. On success the server's tools are attached without a restart.","inputSchema":{"type":"object","properties":{"name":{"type":"string","description":"Downstream name to authenticate (e.g. sentry, mattermost)."}},"required":["name"]}}`)
 }
